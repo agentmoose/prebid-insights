@@ -1,6 +1,7 @@
 import { promises as fsPromises } from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import logger from './logger.js';
 
 const __filename: string = fileURLToPath(import.meta.url);
 const __dirname: string = path.dirname(__filename);
@@ -89,14 +90,10 @@ function compareVersions(a: string, b: string): number {
     return 0;
 }
 
-interface UpdateStatsOptions {
-  logError?: (message: string, errorName: string, errorMessage: string) => void;
-}
-
 /**
  * Main function to summarize and then clean statistics.
  */
-async function updateAndCleanStats(options?: UpdateStatsOptions): Promise<void> {
+async function updateAndCleanStats(): Promise<void> {
     const rawVersionCounts: VersionDistribution = {};
     const rawModuleCounts: ModuleDistribution = {};
     const moduleWebsiteData: { [moduleName: string]: Set<string> } = {}; // To store unique URLs for each module
@@ -169,11 +166,7 @@ async function updateAndCleanStats(options?: UpdateStatsOptions): Promise<void> 
                             }
                         } catch (parseError: any) {
                             const errorMessage = `Error parsing JSON file ${filePath}:`;
-                            if (options?.logError) {
-                                options.logError(errorMessage, parseError.name, parseError.message);
-                            } else {
-                                console.error(errorMessage, parseError);
-                            }
+                            logger.instance.error(errorMessage, { errorName: parseError.name, errorMessage: parseError.message, stack: parseError.stack });
                         }
                     }
                 }
@@ -292,11 +285,7 @@ async function updateAndCleanStats(options?: UpdateStatsOptions): Promise<void> 
 
     } catch (err: any) {
         const errorMessage = 'Error processing stats:';
-        if (options?.logError) {
-            options.logError(errorMessage, err.name, err.message);
-        } else {
-            console.error(errorMessage, err);
-        }
+        logger.instance.error(errorMessage, { errorName: err.name, errorMessage: err.message, stack: err.stack });
     }
 }
 

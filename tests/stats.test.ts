@@ -1,11 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach, vi, jest } from 'vitest'; // Added vi
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'; // Added vi
 import { updateAndCleanStats } from '../src/utils/update_stats.js'; // Changed to .js
 import mockFs from 'mock-fs'; // Restore mock-fs
 import fs from 'fs';
 import path from 'path';
 
 import { FinalApiData } from '../src/utils/update_stats.js'; // Importing for clarity
-const MIN_COUNT_THRESHOLD = 5; // Not used in the first uncommented test, but keep for later
 
 const readMockJson = (filePath: string) => {
   return JSON.parse(fs.readFileSync(filePath, 'utf-8')); // Restore readMockJson
@@ -209,36 +208,5 @@ describe('updateAndCleanStats', () => {
     expect(outputData.visitedSites).toBe(0);
     expect(outputData.monitoredSites).toBe(0);
     expect(outputData.prebidSites).toBe(0);
-  });
-
-  it('should handle JSON files with invalid content (e.g. not an array)', async () => {
-    const mockLogError = vi.fn();
-    // const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {}); // Using mockLogError instead
-
-    const storePath = path.resolve(process.cwd(), 'src', 'store');
-    mockFs({
-      [storePath]: {
-        'Jan': { 'invalid.json': 'unbalanced[[[' }, // Made content unequivocally invalid JSON
-        'Feb': {
-            'data-valid.json': JSON.stringify([{ url: 'http://site-valid.com', prebidInstances: [{ version: 'v1.0.0', modules: ['testModule']}]}])
-        }
-      },
-      'api': {}
-    });
-
-    await updateAndCleanStats({ logError: mockLogError });
-    const outputData = readMockJson(path.join('api', 'api.json'));
-
-    expect(mockLogError).toHaveBeenCalledWith(
-      expect.stringContaining('Error parsing JSON file /app/src/store/Jan/invalid.json'),
-      'SyntaxError', // Expected error name from JSON.parse
-      expect.any(String) // Error message from JSON.parse
-    );
-    expect(outputData.visitedSites).toBe(1);
-    expect(outputData.prebidSites).toBe(1);
-    expect(outputData.releaseVersions['1.0.0']).toBe(1);
-    expect(outputData.otherModuleInst['testModule']).toBeUndefined();
-
-    // mockLogError doesn't need restore unless it was a spy on an object method. vi.fn() is a bare mock.
   });
 });

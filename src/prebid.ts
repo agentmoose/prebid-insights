@@ -8,7 +8,7 @@ import blockResourcesPluginFactory from 'puppeteer-extra-plugin-block-resources'
 import { Cluster } from 'puppeteer-cluster';
 import { Page } from 'puppeteer';
 import { parse } from 'csv-parse/sync';
-import fetch, { Response } from 'node-fetch'; // Ensure fetch is available, already used by fetchUrlsFromGitHub
+import fetch from 'node-fetch'; // Ensure fetch is available, already used by fetchUrlsFromGitHub
 
 // Helper function to configure a new page
 async function configurePage(page: Page): Promise<Page> { // page is passed directly by puppeteer-cluster
@@ -64,148 +64,102 @@ export interface PrebidExplorerOptions {
     puppeteerLaunchOptions?: PuppeteerLaunchOptions;
     range?: string;
     chunkSize?: number;
-    mockConfigFile?: string; // Added for direct mock file path
 }
 
 let logger: WinstonLogger;
 
 const puppeteer = addExtra(puppeteerVanilla as any);
 
-// Helper function to fetch URLs from GitHub
-async function fetchUrlsFromGitHub(
-  repoUrl: string,
-  numUrls: number | undefined,
-  logger: WinstonLogger,
-  mockConfigFilePath?: string // Accept mockConfigFilePath as an argument
-): Promise<string[]> {
-  logger.info(`Fetching URLs from GitHub repository source: ${repoUrl}`);
-  const extractedUrls: string[] = [];
-  let response: Response; // Declare response variable here to be used for actual or mock response
+// Helper function to process file content for URL extraction
+async function processFileContent(fileName: string, content: string, logger: WinstonLogger): Promise<string[]> {
+    const extractedUrls = new Set<string>(); // Use Set for automatic deduplication
+    const urlRegex = /(https?:\/\/[^\s"]+)/gi;
+    const schemelessDomainRegex = /(^|\s|"|')([a-zA-Z0-9-_]+\.)+[a-zA-Z]{2,}(\s|\\"|"|'|$)/g; // Adjusted to handle quotes and escaped quotes
 
-  let mockApiContentsResponse: string | undefined;
-  let mockFileDownloadResponse: string | undefined;
-  let mockDirectFileResponse: string | undefined;
-
-  // Prioritize mockConfigFilePath argument
-  if (mockConfigFilePath) {
-    logger.info(`Attempting to use mock configuration file passed as argument: ${mockConfigFilePath}`);
-    if (fs.existsSync(mockConfigFilePath)) {
-      logger.info(`Mock config file found at: ${mockConfigFilePath}`);
-      try {
-        const mockConfigContent = fs.readFileSync(mockConfigFilePath, 'utf-8');
-        logger.info(`Mock config file content read successfully. Content length: ${mockConfigContent.length}`);
-        if (mockConfigContent.trim() === "") {
-          logger.warn(`Mock config file is empty: ${mockConfigFilePath}`);
-        }
-        const mockConfig = JSON.parse(mockConfigContent);
-        logger.info('Mock config file parsed successfully.');
-
-        mockApiContentsResponse = mockConfig.MOCK_GITHUB_API_CONTENTS_RESPONSE;
-        mockFileDownloadResponse = mockConfig.MOCK_GITHUB_FILE_DOWNLOAD_RESPONSE;
-        mockDirectFileResponse = mockConfig.MOCK_GITHUB_DIRECT_FILE_RESPONSE;
-
-        if (mockApiContentsResponse) logger.info('Loaded MOCK_GITHUB_API_CONTENTS_RESPONSE from argument config file.');
-        else logger.info('MOCK_GITHUB_API_CONTENTS_RESPONSE not found in argument config file.');
-        if (mockFileDownloadResponse) logger.info('Loaded MOCK_GITHUB_FILE_DOWNLOAD_RESPONSE from argument config file.');
-        else logger.info('MOCK_GITHUB_FILE_DOWNLOAD_RESPONSE not found in argument config file.');
-        if (mockDirectFileResponse) logger.info('Loaded MOCK_GITHUB_DIRECT_FILE_RESPONSE from argument config file.');
-        else logger.info('MOCK_GITHUB_DIRECT_FILE_RESPONSE not found in argument config file.');
-
-      } catch (e: any) {
-        logger.error(`Failed to read or parse mock config file at ${mockConfigFilePath}: ${e.message}`, { stack: e.stack });
-      }
-    } else {
-      logger.error(`Mock config file path provided but file not found: ${mockConfigFilePath}`);
+    // Always try to find fully qualified URLs first
+    const fqdnMatches = content.match(urlRegex);
+    if (fqdnMatches) {
+        fqdnMatches.forEach(url => extractedUrls.add(url.trim()));
     }
-  } else {
-    logger.info('No mock configuration file path provided via argument.');
-    // Fallback to MOCK_CONFIG_FILE_PATH environment variable if argument not provided
-    const mockConfigFileEnv = process.env.MOCK_CONFIG_FILE_PATH;
-    if (mockConfigFileEnv) {
-      logger.info(`Attempting to use mock configuration file from MOCK_CONFIG_FILE_PATH env var: ${mockConfigFileEnv}`);
-      if (fs.existsSync(mockConfigFileEnv)) {
-        logger.info(`Mock config file (from env var) found at: ${mockConfigFileEnv}`);
+
+    if (fileName.endsWith('.txt')) {
+        logger.info(`Processing .txt file: ${fileName} for schemeless domains.`);
+        // Find schemeless domains
+        const schemelessMatches = content.match(schemelessDomainRegex);
+        if (schemelessMatches) {
+            schemelessMatches.forEach(domain => {
+                const cleanedDomain = domain.trim().replace(/^["']|["']$/g, ''); // Remove surrounding quotes
+                if (cleanedDomain && !cleanedDomain.includes('://')) { // Ensure it's actually schemeless
+                    const fullUrl = `https://${cleanedDomain}`;
+                    if (!extractedUrls.has(fullUrl)) { // Avoid adding if already found as FQDN
+                        extractedUrls.add(fullUrl);
+                        logger.info(`Found and added schemeless domain as ${fullUrl} from ${fileName}`);
+                    }
+                }
+            });
+        }
+    } else if (fileName.endsWith('.json')) {
+        logger.info(`Processing .json file: ${fileName}`);
         try {
-          const mockConfigContent = fs.readFileSync(mockConfigFileEnv, 'utf-8');
-          logger.info(`Mock config file (from env var) content read successfully. Content length: ${mockConfigContent.length}`);
-          const mockConfig = JSON.parse(mockConfigContent);
-          logger.info('Mock config file (from env var) parsed successfully.');
-          mockApiContentsResponse = mockConfig.MOCK_GITHUB_API_CONTENTS_RESPONSE;
-          mockFileDownloadResponse = mockConfig.MOCK_GITHUB_FILE_DOWNLOAD_RESPONSE;
-          mockDirectFileResponse = mockConfig.MOCK_GITHUB_DIRECT_FILE_RESPONSE;
+            const jsonData = JSON.parse(content);
+            const urlsFromJson = new Set<string>();
+
+            function extractUrlsFromJsonRecursive(data: any) {
+                if (typeof data === 'string') {
+                    const jsonStringMatches = data.match(urlRegex);
+                    if (jsonStringMatches) {
+                        jsonStringMatches.forEach(url => urlsFromJson.add(url.trim()));
+                    }
+                } else if (Array.isArray(data)) {
+                    data.forEach(item => extractUrlsFromJsonRecursive(item));
+                } else if (typeof data === 'object' && data !== null) {
+                    Object.values(data).forEach(value => extractUrlsFromJsonRecursive(value));
+                }
+            }
+
+            extractUrlsFromJsonRecursive(jsonData);
+            if (urlsFromJson.size > 0) {
+                logger.info(`Extracted ${urlsFromJson.size} URLs from parsed JSON structure in ${fileName}`);
+                urlsFromJson.forEach(url => extractedUrls.add(url));
+            }
         } catch (e: any) {
-          logger.error(`Failed to read or parse mock config file (from env var) at ${mockConfigFileEnv}: ${e.message}`, { stack: e.stack });
+            logger.warn(`Failed to parse JSON from ${fileName}. Falling back to regex scan of raw content. Error: ${e.message}`);
+            // Fallback is covered by the initial fqdnMatches scan at the beginning of the function
         }
-      } else {
-        logger.error(`Mock config file path (from env var) provided but file not found: ${mockConfigFileEnv}`);
-      }
-    } else {
-      logger.info('No MOCK_CONFIG_FILE_PATH environment variable found.');
     }
-  }
+    // For other file types (e.g., .md), the initial fqdnMatches scan is sufficient.
 
-  // If still undefined after attempting file reads, try individual env vars
-  if (mockApiContentsResponse === undefined) {
-    logger.info('MOCK_GITHUB_API_CONTENTS_RESPONSE is undefined after file attempts, checking direct env var.');
-    mockApiContentsResponse = process.env.MOCK_GITHUB_API_CONTENTS_RESPONSE;
-    if (mockApiContentsResponse) logger.info('Loaded MOCK_GITHUB_API_CONTENTS_RESPONSE from direct env var.');
-  }
-  if (mockFileDownloadResponse === undefined) {
-    logger.info('MOCK_GITHUB_FILE_DOWNLOAD_RESPONSE is undefined after file attempts, checking direct env var.');
-    mockFileDownloadResponse = process.env.MOCK_GITHUB_FILE_DOWNLOAD_RESPONSE;
-    if (mockFileDownloadResponse) logger.info('Loaded MOCK_GITHUB_FILE_DOWNLOAD_RESPONSE from direct env var.');
-  }
-  if (mockDirectFileResponse === undefined) {
-    logger.info('MOCK_GITHUB_DIRECT_FILE_RESPONSE is undefined after file attempts, checking direct env var.');
-    mockDirectFileResponse = process.env.MOCK_GITHUB_DIRECT_FILE_RESPONSE;
-    if (mockDirectFileResponse) logger.info('Loaded MOCK_GITHUB_DIRECT_FILE_RESPONSE from direct env var.');
-  }
+    return Array.from(extractedUrls);
+}
 
-  const urlRegex = /(https?:\/\/[^\s"]+)/gi;
+// Helper function to fetch URLs from GitHub
+async function fetchUrlsFromGitHub(repoUrl: string, numUrls: number | undefined, logger: WinstonLogger): Promise<string[]> {
+  logger.info(`Fetching URLs from GitHub repository source: ${repoUrl}`);
+
+  const allExtractedUrls: string[] = []; // Changed to allExtractedUrls to avoid confusion with Set in processFileContent
+
 
   try {
     // Check if the URL is a direct link to a file view (contains /blob/)
     if (repoUrl.includes('/blob/')) {
       logger.info(`Detected direct file link: ${repoUrl}. Attempting to fetch raw content.`);
-      // Transform GitHub file view URL to raw content URL
-      // Example: https://github.com/owner/repo/blob/branch/path/to/file.txt
-      // Becomes: https://raw.githubusercontent.com/owner/repo/branch/path/to/file.txt
       const rawUrl = repoUrl.replace('github.com', 'raw.githubusercontent.com').replace('/blob/', '/');
-      
+      const fileName = repoUrl.substring(repoUrl.lastIndexOf('/') + 1); // Extract filename
+
       logger.info(`Fetching content directly from raw URL: ${rawUrl}`);
-
-      if (mockDirectFileResponse) {
-        logger.info('Using mock response for GitHub direct file link (from MOCK_GITHUB_DIRECT_FILE_RESPONSE or config file)');
-        if (mockDirectFileResponse.startsWith('error:')) {
-          const statusCode = parseInt(mockDirectFileResponse.split(':')[1], 10) || 500;
-          response = new Response(JSON.stringify({ message: 'Mocked Error' }), {
-            status: statusCode,
-            statusText: 'Mocked Error',
-            headers: { 'Content-Type': 'application/json' },
-          });
+      const fileResponse = await fetch(rawUrl);
+      if (fileResponse.ok) {
+        const content = await fileResponse.text();
+        const urlsFromFile = await processFileContent(fileName, content, logger);
+        if (urlsFromFile.length > 0) {
+          urlsFromFile.forEach(url => allExtractedUrls.push(url));
+          logger.info(`Extracted ${urlsFromFile.length} URLs from ${rawUrl} (direct file)`);
         } else {
-          response = new Response(mockDirectFileResponse, {
-            status: 200,
-            statusText: 'OK',
-            headers: { 'Content-Type': 'text/plain' },
-          });
+          logger.info(`No URLs found in content from ${rawUrl} (direct file)`);
         }
       } else {
-        response = await fetch(rawUrl);
-      }
-
-      if (response.ok) {
-        const content = await response.text();
-        const matches = content.match(urlRegex);
-        if (matches) {
-          matches.forEach(url => extractedUrls.push(url.trim()));
-          logger.info(`Extracted ${matches.length} URLs from ${rawUrl}`);
-        } else {
-          logger.info(`No URLs found in content from ${rawUrl}`);
-        }
-      } else {
-        logger.error(`Failed to download direct file content: ${rawUrl} - ${response.status} ${response.statusText}`);
-        const errorBody = await response.text();
+        logger.error(`Failed to download direct file content: ${rawUrl} - ${fileResponse.status} ${fileResponse.statusText}`);
+        const errorBody = await fileResponse.text();
         logger.error(`Error body: ${errorBody}`);
         return []; // Return empty if direct file fetch fails
       }
@@ -222,26 +176,9 @@ async function fetchUrlsFromGitHub(
       const contentsUrl = `https://api.github.com/repos/${repoPath}/contents`;
       logger.info(`Fetching repository contents from: ${contentsUrl}`);
 
-      if (mockApiContentsResponse) {
-        logger.info('Using mock response for GitHub Contents API (from MOCK_GITHUB_API_CONTENTS_RESPONSE or config file)');
-        if (mockApiContentsResponse.startsWith('error:')) {
-          const statusCode = parseInt(mockApiContentsResponse.split(':')[1], 10) || 500;
-          response = new Response(JSON.stringify({ message: 'Mocked Error' }), {
-            status: statusCode,
-            statusText: 'Mocked Error',
-            headers: { 'Content-Type': 'application/json' },
-          });
-        } else {
-          // Assuming mockApiContentsResponse is a stringified JSON
-          response = new Response(mockApiContentsResponse, {
-            status: 200,
-            statusText: 'OK',
-            headers: { 'Content-Type': 'application/vnd.github.v3+json' },
-          });
-        }
-      } else {
-        response = await fetch(contentsUrl, { headers: { Accept: 'application/vnd.github.v3+json' } });
-      }
+      const response = await fetch(contentsUrl, {
+        headers: { Accept: 'application/vnd.github.v3+json' },
+      });
 
       if (!response.ok) {
         logger.error(`Failed to fetch repository contents: ${response.status} ${response.statusText}`, { url: contentsUrl });
@@ -256,59 +193,41 @@ async function fetchUrlsFromGitHub(
         return [];
       }
 
-      const targetExtensions = ['.txt', '.md'];
+      // Updated to include .json for targeted processing, .txt and .md for general URL extraction.
+      const targetExtensions = ['.txt', '.md', '.json'];
       logger.info(`Found ${files.length} items in the repository. Filtering for ${targetExtensions.join(', ')} files.`);
 
       for (const file of files) {
-        if (file.type === 'file' && targetExtensions.some(ext => file.name.endsWith(ext))) {
+        // Ensure file.name is defined before calling endsWith
+        if (file.type === 'file' && file.name && targetExtensions.some(ext => file.name.endsWith(ext))) {
           logger.info(`Fetching content for file: ${file.path} from ${file.download_url}`);
-          let fileResponse: Response;
-
-          if (mockFileDownloadResponse) {
-            logger.info(`Using mock response for GitHub file download (from MOCK_GITHUB_FILE_DOWNLOAD_RESPONSE or config file) for ${file.download_url}`);
-            if (mockFileDownloadResponse.startsWith('error:')) {
-              const statusCode = parseInt(mockFileDownloadResponse.split(':')[1], 10) || 500;
-              fileResponse = new Response(JSON.stringify({ message: 'Mocked Error' }), {
-                status: statusCode,
-                statusText: 'Mocked Error',
-                headers: { 'Content-Type': 'application/json' },
-              });
-            } else {
-              fileResponse = new Response(mockFileDownloadResponse, {
-                status: 200,
-                statusText: 'OK',
-                headers: { 'Content-Type': 'text/plain' },
-              });
-            }
-          } else {
-            fileResponse = await fetch(file.download_url);
-          }
-
           try {
+            const fileResponse = await fetch(file.download_url);
             if (fileResponse.ok) {
               const content = await fileResponse.text();
-              const matches = content.match(urlRegex);
-              if (matches) {
-                matches.forEach(url => extractedUrls.push(url.trim()));
-                logger.info(`Extracted ${matches.length} URLs from ${file.path}`);
+              const urlsFromFile = await processFileContent(file.name, content, logger);
+              if (urlsFromFile.length > 0) {
+                urlsFromFile.forEach(url => allExtractedUrls.push(url));
+                logger.info(`Extracted ${urlsFromFile.length} URLs from ${file.path}`);
               }
             } else {
-              logger.warn(`Failed to download file content: ${file.path} - ${fileResponse.status} ${fileResponse.statusText}`);
+              logger.warn(`Failed to download file content: ${file.path} - ${fileResponse.status}`);
             }
           } catch (fileError: any) {
             logger.error(`Error fetching or processing file ${file.path}: ${fileError.message}`, { fileUrl: file.download_url });
           }
 
-          if (numUrls && extractedUrls.length >= numUrls) {
+          if (numUrls && allExtractedUrls.length >= numUrls) {
             logger.info(`Reached URL limit of ${numUrls}. Stopping further file processing.`);
             break;
           }
         }
       }
     }
-
-    logger.info(`Total URLs extracted before limiting: ${extractedUrls.length}`);
-    return numUrls ? extractedUrls.slice(0, numUrls) : extractedUrls;
+    // Deduplicate URLs at the end before slicing
+    const uniqueUrls = Array.from(new Set(allExtractedUrls));
+    logger.info(`Total unique URLs extracted before limiting: ${uniqueUrls.length}`);
+    return numUrls ? uniqueUrls.slice(0, numUrls) : uniqueUrls;
 
   } catch (error: any) {
     logger.error(`Error processing GitHub URL ${repoUrl}: ${error.message}`, { stack: error.stack });
@@ -403,7 +322,7 @@ export async function prebidExplorer(options: PrebidExplorerOptions): Promise<vo
 
     if (options.csvFile) {
         urlSourceType = 'CSV';
-        allUrls = await fetchUrlsFromCsv(options.csvFile, logger); // Assuming fetchUrlsFromCsv doesn't need mock config path for GitHub URLs embedded in CSVs for now
+        allUrls = await fetchUrlsFromCsv(options.csvFile, logger);
         if (allUrls.length > 0) {
             logger.info(`Successfully loaded ${allUrls.length} URLs from CSV file: ${options.csvFile}`);
         } else {
@@ -411,8 +330,7 @@ export async function prebidExplorer(options: PrebidExplorerOptions): Promise<vo
         }
     } else if (options.githubRepo) {
         urlSourceType = 'GitHub';
-        // Pass the mockConfigFile option to fetchUrlsFromGitHub
-        allUrls = await fetchUrlsFromGitHub(options.githubRepo, options.numUrls, logger, options.mockConfigFile);
+        allUrls = await fetchUrlsFromGitHub(options.githubRepo, options.numUrls, logger);
         if (allUrls.length > 0) {
             logger.info(`Successfully loaded ${allUrls.length} URLs from GitHub repository: ${options.githubRepo}`);
         } else {
