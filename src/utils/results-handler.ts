@@ -40,7 +40,8 @@ import type { TaskResult, PageData } from '../common/types.js';
  */
 export function processAndLogTaskResults(
   taskResults: TaskResult[],
-  logger: WinstonLogger
+  logger: WinstonLogger,
+  errorOutputDir: string = 'errors' // Default error output directory
 ): PageData[] {
   const successfulResults: PageData[] = [];
   if (!taskResults || taskResults.length === 0) {
@@ -72,6 +73,7 @@ export function processAndLogTaskResults(
           `NO_DATA: No relevant ad tech data found for ${taskResult.url}`,
           { url: taskResult.url }
         );
+        logErrorUrl(taskResult.url, 'no_prebid', errorOutputDir, logger);
         break;
       case 'error':
         // Log structured error details
@@ -79,6 +81,23 @@ export function processAndLogTaskResults(
           `ERROR: Processing failed for ${taskResult.url} - Code: ${taskResult.error.code}, Msg: ${taskResult.error.message}`,
           { url: taskResult.url, errorDetails: taskResult.error } // errorDetails will contain code, message, and stack
         );
+        // Determine error type for logging
+        const errorCode = taskResult.error.code?.toUpperCase();
+        const errorMessage = taskResult.error.message?.toLowerCase() || '';
+        let errorTypeForFile: ErrorType = 'processing_error'; // Default to processing_error
+
+        if (
+          errorCode === 'ENOTFOUND' ||
+          errorCode === 'ERR_NAME_NOT_RESOLVED' ||
+          errorMessage.includes('navigation timeout') ||
+          errorMessage.includes('net::err_name_not_resolved') ||
+          errorMessage.includes('net::err_connection_refused') ||
+          errorMessage.includes('net::err_timed_out') ||
+          errorMessage.includes('timeout') // A more generic timeout check
+        ) {
+          errorTypeForFile = 'navigation_error';
+        }
+        logErrorUrl(taskResult.url, errorTypeForFile, errorOutputDir, logger);
         break;
       default:
         // This path should ideally be unreachable if 'type' is always a valid TaskResultType.
@@ -123,27 +142,55 @@ export function writeResultsToFile(
   try {
     const now = new Date();
     const year = now.getFullYear().toString();
-    const monthPadded = String(now.getMonth() + 1).padStart(2, '0'); // Ensure two digits for month
-    const monthShort = now.toLocaleString('default', { month: 'short' }); // e.g., "Jan", "Feb"
-    const dayPadded = String(now.getDate()).padStart(2, '0'); // Ensure two digits for day
+    const monthPadded = String(now.getMonth() + 1).padStart(2, '0');
+    const monthShort = now.toLocaleString('default', { month: 'short' });
+    const dayPadded = String(now.getDate()).padStart(2, '0');
 
-    // Create a year-month directory, e.g., "2023-01-Jan"
-    const monthDir = path.join(
-      baseOutputDir,
-      `${year}-${monthPadded}-${monthShort}`
+    // New directory structure: store/<Mmm-yyyy>/<yyyy-mm-dd>.json
+    const monthYearDir = path.join(baseOutputDir, `${monthShort}-${year}`);
+    const fullPathDir = path.join(
+      monthYearDir,
+      `${year}-${monthPadded}-${dayPadded}.json`
     );
-    if (!fs.existsSync(monthDir)) {
-      fs.mkdirSync(monthDir, { recursive: true }); // Create directory recursively if it doesn't exist
-      logger.info(`Created output directory: ${monthDir}`);
+
+    // Ensure all necessary directories are created
+    const dirName = path.dirname(fullPathDir);
+    if (!fs.existsSync(dirName)) {
+      fs.mkdirSync(dirName, { recursive: true });
+      logger.info(`Created output directory: ${dirName}`);
     }
 
-    const dateFilename = `${year}-${monthPadded}-${dayPadded}.json`;
-    const filePath = path.join(monthDir, dateFilename);
+    let finalResults = resultsToSave;
 
-    const jsonOutput = JSON.stringify(resultsToSave, null, 2); // Pretty print JSON
-    fs.writeFileSync(filePath, jsonOutput + '\n', 'utf8'); // Add newline for POSIX compatibility
+    if (fs.existsSync(fullPathDir)) {
+      try {
+        const existingContent = fs.readFileSync(fullPathDir, 'utf8');
+        const existingData = JSON.parse(existingContent);
+        if (Array.isArray(existingData)) {
+          finalResults = [...existingData, ...resultsToSave];
+          logger.info(
+            `Appending ${resultsToSave.length} new results to existing file ${fullPathDir}. Total: ${finalResults.length}`
+          );
+        } else {
+          logger.warn(
+            `Existing file ${fullPathDir} is not valid JSON array. Overwriting with new results.`
+          );
+        }
+      } catch (readError: any) {
+        logger.warn(
+          `Error reading or parsing existing file ${fullPathDir}: ${readError.message}. Overwriting with new results.`
+        );
+      }
+    } else {
+      logger.info(
+        `Creating new file ${fullPathDir} with ${resultsToSave.length} results.`
+      );
+    }
+
+    const jsonOutput = JSON.stringify(finalResults, null, 2);
+    fs.writeFileSync(fullPathDir, jsonOutput + '\n', 'utf8');
     logger.info(
-      `Successfully wrote ${resultsToSave.length} results to ${filePath}`
+      `Successfully wrote ${finalResults.length} results to ${fullPathDir}`
     );
   } catch (e: unknown) {
     const err = e as Error; // Cast to Error for standard properties
@@ -270,5 +317,65 @@ export function updateInputFile(
     logger.error(`Failed to update ${inputFilepath}: ${writeError.message}`, {
       stack: writeError.stack,
     });
+  }
+}
+
+/**
+ * Defines the types of errors that can be logged.
+ */
+export type ErrorType = 'no_prebid' | 'navigation_error' | 'processing_error';
+
+/**
+ * Logs a URL to a specific error file based on the error type.
+ *
+ * @param {string} url - The URL to log.
+ * @param {ErrorType} errorType - The type of error.
+ * @param {string} baseOutputDir - The base directory for error files (e.g., 'errors').
+ * @param {WinstonLogger} logger - An instance of WinstonLogger.
+ */
+export function logErrorUrl(
+  url: string,
+  errorType: ErrorType,
+  baseOutputDir: string,
+  logger: WinstonLogger
+): void {
+  try {
+    if (!fs.existsSync(baseOutputDir)) {
+      fs.mkdirSync(baseOutputDir, { recursive: true });
+      logger.info(`Created error output directory: ${baseOutputDir}`);
+    }
+
+    let errorFileName: string;
+    switch (errorType) {
+      case 'no_prebid':
+        errorFileName = 'no_prebid.txt';
+        break;
+      case 'navigation_error':
+        errorFileName = 'navigation_errors.txt';
+        break;
+      case 'processing_error':
+        errorFileName = 'error_processing.txt';
+        break;
+      default:
+        // Should not happen with ErrorType
+        logger.warn(`Unknown error type: ${errorType}`);
+        return;
+    }
+
+    const filePath = path.join(baseOutputDir, errorFileName);
+    fs.appendFileSync(filePath, `${url}\n`, 'utf8');
+    logger.info(
+      `Logged URL ${url} to ${filePath} for error type ${errorType}.`
+    );
+  } catch (e: unknown) {
+    const err = e as Error;
+    logger.error(
+      `Failed to log URL ${url} for error type ${errorType} to file.`,
+      {
+        errorName: err.name,
+        errorMessage: err.message,
+        stack: err.stack,
+      }
+    );
   }
 }

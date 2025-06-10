@@ -59,6 +59,7 @@
     "eslint-config-prettier": "^10.1.5",
     "eslint-plugin-prettier": "^5.4.1",
     "inquirer": "^12.6.3",
+    "jsdom": "^26.1.0",
     "mock-fs": "^5.5.0",
     "nock": "^14.0.5",
     "oclif": "^4.17.46",
